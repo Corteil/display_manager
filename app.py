@@ -26,22 +26,11 @@ COLOR_GRAY        = (0.50, 0.60, 0.75)
 COLOR_RED         = (1.00, 0.25, 0.25)
 
 MENU_ITEMS = [
-    "Mirror to HDMI",
-    "Mirror to 2nd Screen",
+    "Mirror Display",
     "Dual-Screen Demo",
     "Detach All Mirrors",
     "Dual Mirror FAQ",
 ]
-
-BOOT_PY_TEMPLATE = """# This file is executed on every boot (including wake-boot from deepsleep)
-import display
-
-try:
-    display.attach_mirror(port={port}, baudrate={baud}, raw={raw})
-    print("[BOOT] Mirror auto-attached on Port {port}")
-except Exception as e:
-    print("[BOOT] Mirror attach skipped:", e)
-"""
 
 BOOT_PY_STANDALONE = """# This file is executed on every boot (including wake-boot from deepsleep)
 # Standalone mode - no active display mirrors
@@ -109,7 +98,7 @@ class DisplayManagerApp(app.App):
             self.status_msg = "No mirror currently active"
             self.status_color = COLOR_GRAY
 
-    def _save_persistent_boot(self, port, baud, raw, sck=None, mosi=None):
+    def _save_persistent_boot(self, port, baud, driver="hdmi", sck=None, mosi=None):
         try:
             with open("/boot.py", "w") as f:
                 if sck is not None and mosi is not None:
@@ -117,7 +106,7 @@ class DisplayManagerApp(app.App):
 import display
 
 try:
-    display.attach_mirror(port={port}, sck={sck}, mosi={mosi}, baudrate={baud}, raw={raw})
+    display.attach_mirror(port={port}, sck={sck}, mosi={mosi}, baudrate={baud}, driver='{driver}')
     print("[BOOT] Mirror auto-attached on Port {port} (sck={sck}, mosi={mosi})")
 except Exception as e:
     print("[BOOT] Mirror attach skipped:", e)
@@ -127,7 +116,7 @@ except Exception as e:
 import display
 
 try:
-    display.attach_mirror(port={port}, baudrate={baud}, raw={raw})
+    display.attach_mirror(port={port}, baudrate={baud}, driver='{driver}')
     print("[BOOT] Mirror auto-attached on Port {port}")
 except Exception as e:
     print("[BOOT] Mirror attach skipped:", e)
@@ -210,41 +199,52 @@ except Exception as e:
 
     def _activate_menu_selection(self):
         idx = self.selected_menu_idx
-        if idx == 0: # HDMI Mirror
-            self.target_mode = "HDMI"
-            self.selected_port = 1
-            self.state = STATE_PORT_SELECT
-        elif idx == 1: # Screen Hexp Mirror
-            self.target_mode = "SCREEN"
+        if idx == 0: # Mirror Display
+            self.target_mode = "MIRROR"
             det = self._detect_screen_port()
-            self.selected_port = det if det is not None else 4
+            self.selected_port = det if det is not None else 1
             self.state = STATE_PORT_SELECT
-        elif idx == 2: # Dual-Screen Demo
+        elif idx == 1: # Dual-Screen Demo
             self.target_mode = "DEMO"
             det = self._detect_screen_port()
             self.selected_port = det if det is not None else 4
             self.state = STATE_PORT_SELECT
-        elif idx == 3: # Detach
+        elif idx == 2: # Detach
             display.detach_mirror(0)
             self._clear_persistent_boot()
             self.status_msg = "All mirrors detached"
             self.status_color = COLOR_RED
             self._refresh_active_status()
-        elif idx == 4: # FAQ
+        elif idx == 3: # FAQ
             self.state = STATE_FAQ
 
-    def _attach_screen_mirror(self, port):
+    def _attach_mirror(self, port, driver=None):
         time.sleep_ms(150)
         try:
+            det = self._detect_screen_port()
+            if driver is None:
+                if port == det:
+                    driver = "gc9a01"
+                    baud = 40000000
+                    mode_name = "Screen"
+                else:
+                    driver = "hdmi"
+                    baud = 10000000
+                    mode_name = "HDMI"
+            else:
+                baud = 40000000 if driver == "gc9a01" else 10000000
+                mode_name = "Screen" if driver == "gc9a01" else "HDMI"
+
             display.detach_mirror(0)
-            display.attach_mirror(port=port, baudrate=40000000, raw=True)
-            self._save_persistent_boot(port=port, baud=40000000, raw=True)
-            self.status_msg = f"Screen Mirror: Port {port}"
+            display.attach_mirror(port=port, baudrate=baud, driver=driver)
+            self._save_persistent_boot(port=port, baud=baud, driver=driver)
+            self.status_msg = f"{mode_name} Mirror: Port {port}"
             self.status_color = COLOR_GREEN
-            self.active_mirror_mode = "SCREEN"
+            self.active_mirror_mode = mode_name.upper()
             self.active_mirror_port = port
-            self.last_detected_screen_port = port
-            print(f"[MIRROR] Screen mirror attached on Port {port}")
+            if driver == "gc9a01":
+                self.last_detected_screen_port = port
+            print(f"[MIRROR] {mode_name} mirror attached on Port {port} (driver={driver}, baud={baud})")
         except Exception as e:
             print(f"Failed to attach mirror on Port {port}:", e)
             self.status_msg = f"Attach error: {e}"
@@ -262,7 +262,7 @@ except Exception as e:
                     is_screen = True
             if is_screen:
                 print(f"[EVENT] Screen hexpansion mounted on Port {event.port}")
-                self._attach_screen_mirror(event.port)
+                self._attach_mirror(event.port, driver="gc9a01")
 
     def handle_hexpansion_unmounted(self, event):
         if self.active_mirror_mode == "SCREEN" and event.port == self.active_mirror_port:
@@ -274,22 +274,8 @@ except Exception as e:
     def _execute_port_action(self):
         port = self.selected_port
         
-        if self.target_mode == "HDMI":
-            try:
-                display.detach_mirror(0)
-                display.attach_mirror(port=port, baudrate=10000000, raw=False)
-                self._save_persistent_boot(port=port, baud=10000000, raw=False)
-                self.status_msg = f"HDMI Mirror on Port {port}"
-                self.status_color = COLOR_GREEN
-                self.active_mirror_mode = "HDMI"
-                self.active_mirror_port = port
-            except Exception as e:
-                self.status_msg = f"Error: {e}"
-                self.status_color = COLOR_RED
-            self.state = STATE_MENU
-
-        elif self.target_mode == "SCREEN":
-            self._attach_screen_mirror(port)
+        if self.target_mode == "MIRROR":
+            self._attach_mirror(port)
             self.state = STATE_MENU
 
         elif self.target_mode == "DEMO":
@@ -330,7 +316,7 @@ except Exception as e:
                 if detected is not None:
                     if detected != self.last_detected_screen_port or not display.is_mirror_active(detected):
                         print(f"[HOTPLUG POLL] Screen detected on Port {detected}")
-                        self._attach_screen_mirror(detected)
+                        self._attach_mirror(detected, driver="gc9a01")
                 else:
                     if self.last_detected_screen_port is not None:
                         print(f"[HOTPLUG POLL] Screen disconnected from Port {self.last_detected_screen_port}")
@@ -420,12 +406,12 @@ except Exception as e:
         ctx.rgb(*COLOR_CYAN).move_to(0, -85).text("DISPLAY MANAGER")
         
         # Menu items list
-        y_start = -48
+        y_start = -42
         box_w = 186
-        box_h = 23
+        box_h = 24
         
         for i, title in enumerate(MENU_ITEMS):
-            y = y_start + i * 26
+            y = y_start + i * 28
             is_sel = (i == self.selected_menu_idx)
             
             if is_sel:
@@ -459,9 +445,20 @@ except Exception as e:
         ctx.font_size = 15
         ctx.rgb(*COLOR_CYAN).move_to(0, -88).text("SELECT PORT")
         
-        mode_label = "HDMI Mirror" if self.target_mode == "HDMI" else ("Screen Mirror" if self.target_mode == "SCREEN" else "Dual Demo")
+        det = self._detect_screen_port()
+        if self.target_mode == "MIRROR":
+            if self.selected_port == det:
+                mode_label = "Screen (GC9A01 LCD)"
+                mode_color = COLOR_GREEN
+            else:
+                mode_label = "HDMI / Raw Stream"
+                mode_color = COLOR_CYAN
+        else:
+            mode_label = "Dual Screen Demo"
+            mode_color = COLOR_GOLD
+            
         ctx.font_size = 12
-        ctx.rgb(*COLOR_WHITE).move_to(0, -68).text(f"Target: {mode_label}")
+        ctx.rgb(*mode_color).move_to(0, -68).text(f"Device: {mode_label}")
         
         # Port number display box
         box_w = 110
