@@ -40,6 +40,12 @@ MENU_ITEMS = [
     "Dual Mirror FAQ",
 ]
 
+DRIVER_OPTIONS = [
+    ("GC9A01", "Screen (GC9A01)", GC9A01_DRIVER, 40000000),
+    ("HDMI",   "HDMI Display",    HDMI_DRIVER,   10000000),
+    ("RAW",    "Raw Pixel DMA",   None,          40000000),
+]
+
 BOOT_PY_STANDALONE = """# This file is executed on every boot (including wake-boot from deepsleep)
 # Standalone mode - no active display mirrors
 """
@@ -51,8 +57,9 @@ class DisplayManagerApp(app.App):
         
         self.state = STATE_MENU
         self.selected_menu_idx = 0
-        self.target_mode = "HDMI"
+        self.target_mode = "MIRROR"
         self.selected_port = 1
+        self.selected_driver_idx = 0
         self.status_msg = "Select an option"
         self.status_color = COLOR_CYAN
         
@@ -162,10 +169,16 @@ except Exception as e:
                 self.minimise()
 
         elif self.state == STATE_PORT_SELECT:
-            if is_up or is_right:
+            if is_down:
                 self.selected_port = ((self.selected_port) % 6) + 1
-            elif is_down or is_left:
+                self.selected_driver_idx = 0 if self._port_has_screen(self.selected_port) else 1
+            elif is_up:
                 self.selected_port = ((self.selected_port - 2) % 6) + 1
+                self.selected_driver_idx = 0 if self._port_has_screen(self.selected_port) else 1
+            elif is_right:
+                self.selected_driver_idx = (self.selected_driver_idx + 1) % len(DRIVER_OPTIONS)
+            elif is_left:
+                self.selected_driver_idx = (self.selected_driver_idx - 1) % len(DRIVER_OPTIONS)
             elif is_confirm:
                 self._execute_port_action()
             elif is_cancel:
@@ -199,8 +212,15 @@ except Exception as e:
                     i2c = I2C(p)
                     devs = i2c.scan()
                     if 0x50 in devs:
-                        hdr = read_hexpansion_header(i2c, 0x50)
-                        if hdr and hdr.vid == 0x4D42 and hdr.pid == 0x5EE5:
+                        try:
+                            hdr = read_hexpansion_header(i2c, 0x50)
+                            if hdr and hdr.vid == 0x4D42 and hdr.pid == 0x5EE5:
+                                return p
+                            elif hdr is None:
+                                # Blank or unprovisioned EEPROM on hexpansion port (e.g. 2nd screen)
+                                return p
+                        except Exception:
+                            # Screen hexpansion with blank or unprovisioned EEPROM
                             return p
                 except Exception:
                     pass
@@ -208,17 +228,30 @@ except Exception as e:
             pass
         return None
 
+    def _port_has_screen(self, port):
+        det = self._detect_screen_port()
+        if det == port:
+            return True
+        try:
+            from machine import I2C
+            i2c = I2C(port)
+            return 0x50 in i2c.scan()
+        except Exception:
+            return False
+
     def _activate_menu_selection(self):
         idx = self.selected_menu_idx
         if idx == 0: # Mirror Display
             self.target_mode = "MIRROR"
             det = self._detect_screen_port()
             self.selected_port = det if det is not None else 1
+            self.selected_driver_idx = 0 if self._port_has_screen(self.selected_port) else 1
             self.state = STATE_PORT_SELECT
         elif idx == 1: # Dual-Screen Demo
             self.target_mode = "DEMO"
             det = self._detect_screen_port()
             self.selected_port = det if det is not None else 4
+            self.selected_driver_idx = 0 if self._port_has_screen(self.selected_port) else 1
             self.state = STATE_PORT_SELECT
         elif idx == 2: # Detach
             display.detach_mirror(0)
@@ -229,28 +262,22 @@ except Exception as e:
         elif idx == 3: # FAQ
             self.state = STATE_FAQ
 
-    def _attach_mirror(self, port, driver=None, driver_name=None):
+    def _attach_mirror(self, port, driver=None, driver_name=None, baud=None):
         time.sleep_ms(150)
         try:
-            det = self._detect_screen_port()
-            if driver is None and driver_name is None:
-                if port == det:
-                    driver = GC9A01_DRIVER
-                    driver_name = "GC9A01"
-                    baud = 40000000
-                    mode_name = "Screen"
-                else:
-                    driver = HDMI_DRIVER
-                    driver_name = "HDMI"
-                    baud = 10000000
-                    mode_name = "HDMI"
-            else:
+            if driver_name is None:
+                drv_key, drv_name, drv_dict, drv_baud = DRIVER_OPTIONS[self.selected_driver_idx]
+                driver = drv_dict
+                driver_name = drv_key
+                baud = drv_baud
+            elif baud is None:
                 baud = 40000000 if driver_name == "GC9A01" else 10000000
-                mode_name = "Screen" if driver_name == "GC9A01" else "HDMI"
+
+            mode_name = "Screen" if driver_name == "GC9A01" else ("HDMI" if driver_name == "HDMI" else "Raw")
 
             display.detach_mirror(0)
             display.attach_mirror(port=port, baudrate=baud, driver=driver)
-            self._save_persistent_boot(port=port, baud=baud, driver_name=driver_name)
+            self._save_persistent_boot(port=port, baud=baud, driver_name=(driver_name if driver_name != "RAW" else None))
             self.status_msg = f"{mode_name} Mirror: Port {port}"
             self.status_color = COLOR_GREEN
             self.active_mirror_mode = mode_name.upper()
@@ -275,7 +302,7 @@ except Exception as e:
                     is_screen = True
             if is_screen:
                 print(f"[EVENT] Screen hexpansion mounted on Port {event.port}")
-                self._attach_mirror(event.port, driver=GC9A01_DRIVER, driver_name="GC9A01")
+                self._attach_mirror(event.port, driver=GC9A01_DRIVER, driver_name="GC9A01", baud=40000000)
 
     def handle_hexpansion_unmounted(self, event):
         if self.active_mirror_mode == "SCREEN" and event.port == self.active_mirror_port:
@@ -286,24 +313,23 @@ except Exception as e:
 
     def _execute_port_action(self):
         port = self.selected_port
+        drv_key, drv_name, drv_dict, drv_baud = DRIVER_OPTIONS[self.selected_driver_idx]
         
         if self.target_mode == "MIRROR":
-            self._attach_mirror(port)
+            self._attach_mirror(port, driver=drv_dict, driver_name=drv_key, baud=drv_baud)
             self.state = STATE_MENU
 
         elif self.target_mode == "DEMO":
             self.demo_target_port = port
+            self.demo_target_driver = drv_dict
+            self.demo_target_baud = drv_baud
             self._start_dual_demo()
 
     def _start_dual_demo(self):
         display.detach_mirror(0)
         try:
-            if self.demo_target_port == 1:
-                baud = 10000000
-                driver = HDMI_DRIVER
-            else:
-                baud = 40000000
-                driver = GC9A01_DRIVER
+            baud = getattr(self, "demo_target_baud", 40000000)
+            driver = getattr(self, "demo_target_driver", GC9A01_DRIVER)
             self.sec_screen = display.Screen(port=self.demo_target_port, width=240, height=240,
                                              baudrate=baud, driver=driver)
             self.demo_frame = 0
@@ -458,36 +484,33 @@ except Exception as e:
         ctx.text_align = ctx.CENTER
         ctx.text_baseline = ctx.MIDDLE
         
-        # Title & Target Mode
-        ctx.font_size = 15
-        ctx.rgb(*COLOR_CYAN).move_to(0, -88).text("SELECT PORT")
+        # Title
+        ctx.font_size = 14
+        ctx.rgb(*COLOR_CYAN).move_to(0, -90).text("SELECT PORT & DRIVER")
         
-        det = self._detect_screen_port()
-        if self.target_mode == "MIRROR":
-            if self.selected_port == det:
-                mode_label = "Screen (GC9A01 LCD)"
-                mode_color = COLOR_GREEN
-            else:
-                mode_label = "HDMI / Raw Stream"
-                mode_color = COLOR_CYAN
-        else:
-            mode_label = "Dual Screen Demo"
-            mode_color = COLOR_GOLD
-            
-        ctx.font_size = 12
-        ctx.rgb(*mode_color).move_to(0, -68).text(f"Device: {mode_label}")
+        drv_key, drv_label, _, _ = DRIVER_OPTIONS[self.selected_driver_idx]
         
         # Port number display box
-        box_w = 110
-        box_h = 44
+        box_w = 120
+        box_h = 34
         ctx.rgb(*COLOR_CARD_BG)
-        ctx.round_rectangle(-box_w // 2, -22 - box_h // 2, box_w, box_h, 8).fill()
-        ctx.rgb(*COLOR_GOLD).line_width = 2.0
-        ctx.round_rectangle(-box_w // 2, -22 - box_h // 2, box_w, box_h, 8).stroke()
+        ctx.round_rectangle(-box_w // 2, -50 - box_h // 2, box_w, box_h, 6).fill()
+        ctx.rgb(*COLOR_GOLD).line_width = 1.5
+        ctx.round_rectangle(-box_w // 2, -50 - box_h // 2, box_w, box_h, 6).stroke()
+        ctx.font_size = 17
+        ctx.rgb(*COLOR_GOLD).move_to(0, -50).text(f"PORT {self.selected_port}")
         
-        ctx.font_size = 20
-        ctx.rgb(*COLOR_GOLD).move_to(0, -22).text(f"PORT {self.selected_port}")
-        
+        # Driver selector display box
+        d_box_w = 190
+        d_box_h = 34
+        ctx.rgb(*COLOR_CARD_BG)
+        ctx.round_rectangle(-d_box_w // 2, -6 - d_box_h // 2, d_box_w, d_box_h, 6).fill()
+        drv_color = COLOR_GREEN if drv_key == "GC9A01" else (COLOR_CYAN if drv_key == "HDMI" else COLOR_WHITE)
+        ctx.rgb(*drv_color).line_width = 1.5
+        ctx.round_rectangle(-d_box_w // 2, -6 - d_box_h // 2, d_box_w, d_box_h, 6).stroke()
+        ctx.font_size = 13
+        ctx.rgb(*drv_color).move_to(0, -6).text(f"< {drv_label} >")
+
         try:
             pins = display.get_port_pins(self.selected_port)
             p_text = f"SCK:{pins['sck']} MOSI:{pins['mosi']} CS:{pins['cs']} DC:{pins['dc']}"
@@ -495,12 +518,12 @@ except Exception as e:
             p_text = "Standard Hexpansion Pinout"
             
         ctx.font_size = 10
-        ctx.rgb(*COLOR_GRAY).move_to(0, 16).text(p_text)
-        ctx.rgb(*COLOR_GREEN).move_to(0, 38).text("(Persists across reboots in boot.py)")
+        ctx.rgb(*COLOR_GRAY).move_to(0, 30).text(p_text)
+        ctx.rgb(*COLOR_GREEN).move_to(0, 48).text("(Persists in /boot.py)")
         
-        ctx.font_size = 11
-        ctx.rgb(*COLOR_WHITE).move_to(0, 76).text("A/D: Change Port")
-        ctx.rgb(*COLOR_CYAN).move_to(0, 96).text("C: Activate    F: Back")
+        ctx.font_size = 10
+        ctx.rgb(*COLOR_WHITE).move_to(0, 76).text("A/D: Port   B/E: Driver")
+        ctx.rgb(*COLOR_CYAN).move_to(0, 95).text("C: Activate    F: Back")
 
     def _draw_dual_demo_primary(self, ctx):
         ctx.text_align = ctx.CENTER
