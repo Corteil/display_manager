@@ -6,6 +6,14 @@ import display
 from system.eventbus import eventbus
 from events.input import BUTTON_TYPES, ButtonDownEvent, Buttons
 try:
+    from apps.display_manager.display_drivers import GC9A01_DRIVER, HDMI_DRIVER
+except ImportError:
+    try:
+        from display_drivers import GC9A01_DRIVER, HDMI_DRIVER
+    except ImportError:
+        GC9A01_DRIVER = None
+        HDMI_DRIVER = None
+try:
     from system.hexpansion.events import HexpansionMountedEvent, HexpansionUnmountedEvent
 except ImportError:
     HexpansionMountedEvent = None
@@ -98,15 +106,17 @@ class DisplayManagerApp(app.App):
             self.status_msg = "No mirror currently active"
             self.status_color = COLOR_GRAY
 
-    def _save_persistent_boot(self, port, baud, driver="hdmi", sck=None, mosi=None):
+    def _save_persistent_boot(self, port, baud, driver_name="HDMI", sck=None, mosi=None):
         try:
+            driver_import = f"from apps.display_manager.display_drivers import {driver_name}_DRIVER\n    driver = {driver_name}_DRIVER" if driver_name else "driver = None"
             with open("/boot.py", "w") as f:
                 if sck is not None and mosi is not None:
                     f.write(f"""# This file is executed on every boot (including wake-boot from deepsleep)
 import display
 
 try:
-    display.attach_mirror(port={port}, sck={sck}, mosi={mosi}, baudrate={baud}, driver='{driver}')
+    {driver_import}
+    display.attach_mirror(port={port}, sck={sck}, mosi={mosi}, baudrate={baud}, driver=driver)
     print("[BOOT] Mirror auto-attached on Port {port} (sck={sck}, mosi={mosi})")
 except Exception as e:
     print("[BOOT] Mirror attach skipped:", e)
@@ -116,7 +126,8 @@ except Exception as e:
 import display
 
 try:
-    display.attach_mirror(port={port}, baudrate={baud}, driver='{driver}')
+    {driver_import}
+    display.attach_mirror(port={port}, baudrate={baud}, driver=driver)
     print("[BOOT] Mirror auto-attached on Port {port}")
 except Exception as e:
     print("[BOOT] Mirror attach skipped:", e)
@@ -218,33 +229,35 @@ except Exception as e:
         elif idx == 3: # FAQ
             self.state = STATE_FAQ
 
-    def _attach_mirror(self, port, driver=None):
+    def _attach_mirror(self, port, driver=None, driver_name=None):
         time.sleep_ms(150)
         try:
             det = self._detect_screen_port()
-            if driver is None:
+            if driver is None and driver_name is None:
                 if port == det:
-                    driver = "gc9a01"
+                    driver = GC9A01_DRIVER
+                    driver_name = "GC9A01"
                     baud = 40000000
                     mode_name = "Screen"
                 else:
-                    driver = "hdmi"
+                    driver = HDMI_DRIVER
+                    driver_name = "HDMI"
                     baud = 10000000
                     mode_name = "HDMI"
             else:
-                baud = 40000000 if driver == "gc9a01" else 10000000
-                mode_name = "Screen" if driver == "gc9a01" else "HDMI"
+                baud = 40000000 if driver_name == "GC9A01" else 10000000
+                mode_name = "Screen" if driver_name == "GC9A01" else "HDMI"
 
             display.detach_mirror(0)
             display.attach_mirror(port=port, baudrate=baud, driver=driver)
-            self._save_persistent_boot(port=port, baud=baud, driver=driver)
+            self._save_persistent_boot(port=port, baud=baud, driver_name=driver_name)
             self.status_msg = f"{mode_name} Mirror: Port {port}"
             self.status_color = COLOR_GREEN
             self.active_mirror_mode = mode_name.upper()
             self.active_mirror_port = port
-            if driver == "gc9a01":
+            if driver_name == "GC9A01":
                 self.last_detected_screen_port = port
-            print(f"[MIRROR] {mode_name} mirror attached on Port {port} (driver={driver}, baud={baud})")
+            print(f"[MIRROR] {mode_name} mirror attached on Port {port} (baud={baud})")
         except Exception as e:
             print(f"Failed to attach mirror on Port {port}:", e)
             self.status_msg = f"Attach error: {e}"
@@ -262,7 +275,7 @@ except Exception as e:
                     is_screen = True
             if is_screen:
                 print(f"[EVENT] Screen hexpansion mounted on Port {event.port}")
-                self._attach_mirror(event.port, driver="gc9a01")
+                self._attach_mirror(event.port, driver=GC9A01_DRIVER, driver_name="GC9A01")
 
     def handle_hexpansion_unmounted(self, event):
         if self.active_mirror_mode == "SCREEN" and event.port == self.active_mirror_port:
@@ -280,15 +293,19 @@ except Exception as e:
 
         elif self.target_mode == "DEMO":
             self.demo_target_port = port
-            self.demo_target_raw = False if port == 1 else True
             self._start_dual_demo()
 
     def _start_dual_demo(self):
         display.detach_mirror(0)
         try:
-            baud = 10000000 if not self.demo_target_raw else 40000000
+            if self.demo_target_port == 1:
+                baud = 10000000
+                driver = HDMI_DRIVER
+            else:
+                baud = 40000000
+                driver = GC9A01_DRIVER
             self.sec_screen = display.Screen(port=self.demo_target_port, width=240, height=240,
-                                             baudrate=baud, raw=self.demo_target_raw)
+                                             baudrate=baud, driver=driver)
             self.demo_frame = 0
             self.state = STATE_DUAL_DEMO
         except Exception as e:
@@ -316,7 +333,7 @@ except Exception as e:
                 if detected is not None:
                     if detected != self.last_detected_screen_port or not display.is_mirror_active(detected):
                         print(f"[HOTPLUG POLL] Screen detected on Port {detected}")
-                        self._attach_mirror(detected, driver="gc9a01")
+                        self._attach_mirror(detected, driver=GC9A01_DRIVER, driver_name="GC9A01")
                 else:
                     if self.last_detected_screen_port is not None:
                         print(f"[HOTPLUG POLL] Screen disconnected from Port {self.last_detected_screen_port}")
