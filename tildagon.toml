@@ -1,0 +1,12 @@
+[app]
+name = "Display Manager"
+category = "Settings"
+
+[entry]
+class = "DisplayManagerApp"
+
+[metadata]
+author = "EMF Tildagon Team"
+license = "MIT"
+description = "Manage HDMI mirroring, Screen hexpansions, and independent dual displays."
+version = "v1.0.0"

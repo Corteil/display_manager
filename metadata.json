@@ -1,0 +1,7 @@
+{
+    "name": "Display Manager",
+    "category": "Settings",
+    "author": "EMF Tildagon Team",
+    "description": "Manage HDMI mirroring, Screen hexpansions, and independent dual displays.",
+    "version": "1.0.0"
+}
