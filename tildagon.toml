@@ -6,7 +6,7 @@ category = "Settings"
 class = "DisplayManagerApp"
 
 [metadata]
-author = "EMF Tildagon Team"
+author = "Jon Hazan"
 license = "MIT"
 description = "Manage HDMI mirroring, Screen hexpansions, and independent dual displays."
 version = "v1.0.0"
