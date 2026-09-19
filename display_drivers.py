@@ -71,5 +71,5 @@ GC9A01_DRIVER = {
 # Transmits 4-byte framing magic header 'TDHD' before pixel payload
 HDMI_DRIVER = {
     "header": b"TDHD",
-    "baudrate": 10_000_000,
+    "baudrate": 20_000_000,
 }
