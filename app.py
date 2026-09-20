@@ -206,14 +206,18 @@ except Exception as e:
             pass
         try:
             from machine import I2C
-            from system.hexpansion.util import read_hexpansion_header
+            from system.hexpansion.util import detect_eeprom_addr, read_hexpansion_header
             for p in range(1, 7):
                 try:
                     i2c = I2C(p)
-                    devs = i2c.scan()
-                    if 0x50 in devs:
+                    # detect_eeprom_addr() covers both valid 2-byte-addressing
+                    # signals (only 0x50 answers, or only 0x57 answers) --
+                    # hardcoding 0x50 here missed any hexpansion built the
+                    # 0x57 way.
+                    addr, addr_len = detect_eeprom_addr(i2c)
+                    if addr is not None:
                         try:
-                            hdr = read_hexpansion_header(i2c, 0x50)
+                            hdr = read_hexpansion_header(i2c, addr, addr_len=addr_len)
                             if hdr and hdr.vid == 0x4D42 and hdr.pid == 0x5EE5:
                                 return p
                             elif hdr is None:
@@ -229,13 +233,46 @@ except Exception as e:
         return None
 
     def _port_has_screen(self, port):
+        # Prefer the badge's own hexpansion registry (same as
+        # _detect_screen_port()'s first check) over a live I2C read --
+        # avoids redundant bus traffic and matches the system's own
+        # notion of what's plugged in where.
+        try:
+            from system.hexpansion.util import get_slots_by_vid_pid
+            slots = get_slots_by_vid_pid(0x4D42, 0x5EE5)
+            if slots and port in slots:
+                return True
+        except Exception:
+            pass
         det = self._detect_screen_port()
         if det == port:
             return True
         try:
             from machine import I2C
+            from system.hexpansion.util import detect_eeprom_addr, read_hexpansion_header
             i2c = I2C(port)
-            return 0x50 in i2c.scan()
+            # detect_eeprom_addr() covers both valid 2-byte-addressing
+            # signals (only 0x50 answers, or only 0x57 answers) -- see
+            # _detect_screen_port()'s identical comment.
+            addr, addr_len = detect_eeprom_addr(i2c)
+            if addr is None:
+                return False
+            # Answering at the identity-EEPROM address alone used to be
+            # treated as "this is a screen" -- every correctly-implemented
+            # hexpansion answers there, not just GC9A01 screens (e.g.
+            # rp2350-hdmi-hexpansion's own fake EEPROM, VID 0x1969/PID
+            # 0x4544). That made _activate_menu_selection() default Port 1
+            # to the GC9A01 driver (40MHz, wrong protocol) whenever that
+            # HDMI hexpansion was plugged in instead, crashing its
+            # receiver. Match _detect_screen_port()'s own VID/PID check.
+            try:
+                hdr = read_hexpansion_header(i2c, addr, addr_len=addr_len)
+                return hdr is not None and hdr.vid == 0x4D42 and hdr.pid == 0x5EE5
+            except Exception:
+                # Blank/unprovisioned EEPROM (e.g. an unconfigured 2nd
+                # screen) -- _detect_screen_port() treats this as a screen
+                # candidate too, so match that here.
+                return True
         except Exception:
             return False
 
